@@ -6,7 +6,7 @@ import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Badge } from '../components/ui/Badge';
 import { useStaggeredEntrance } from '../hooks/useStaggeredEntrance';
-import { useToast } from '../contexts/ToastContext';
+import { useToast } from '../features/shared/hooks/useToast';
 import { knowledgeBaseService, KnowledgeItem, KnowledgeItemMetadata } from '../services/knowledgeBaseService';
 import { CrawlProgressData } from '../types/crawl';
 import { KnowledgeTable } from '../components/knowledge-base/KnowledgeTable';
