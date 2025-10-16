@@ -12,6 +12,8 @@ tmp/
 temp/
 UAT/
 
+data/
+
 .DS_Store
 
 # Local release notes testing
