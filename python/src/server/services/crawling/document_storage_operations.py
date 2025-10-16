@@ -6,8 +6,12 @@ Extracted from crawl_orchestration_service.py for better modularity.
 """
 
 import asyncio
+import os
+import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from ...config.logfire_config import get_logger, safe_logfire_error, safe_logfire_info
 from ..source_management_service import extract_source_summary, update_source_info
@@ -33,6 +37,8 @@ class DocumentStorageOperations:
         self.supabase_client = supabase_client
         self.doc_storage_service = DocumentStorageService(supabase_client)
         self.code_extraction_service = CodeExtractionService(supabase_client)
+        self._project_root = self._determine_project_root()
+        self._markdown_archive_dir = self._resolve_markdown_archive_dir()
 
     async def process_and_store_documents(
         self,
@@ -285,8 +291,137 @@ class DocumentStorageOperations:
             'chunks_stored': chunks_stored,
             'total_word_count': sum(source_word_counts.values()),
             'url_to_full_document': url_to_full_document,
-            'source_id': original_source_id
+            'source_id': original_source_id,
+            'markdown_files_saved': await self._persist_markdown_archive(
+                url_to_full_document,
+                original_source_id,
+            ),
         }
+
+    def _determine_project_root(self) -> Path:
+        """Locate the repository root for fallback storage."""
+        try:
+            return Path(__file__).resolve().parents[5]
+        except IndexError:
+            return Path.cwd()
+
+    def _resolve_markdown_archive_dir(self) -> Path:
+        """
+        Determine where scraped markdown archives should be stored.
+
+        Returns:
+            Absolute path to the archive directory.
+        """
+        configured = os.getenv("ARCHON_MARKDOWN_ARCHIVE_DIR")
+        project_root = self._project_root
+
+        if configured:
+            archive_dir = Path(configured).expanduser()
+            if not archive_dir.is_absolute():
+                archive_dir = (project_root / archive_dir).resolve()
+        else:
+            archive_dir = Path("/Data_dir").resolve()
+
+        return archive_dir
+
+    async def _persist_markdown_archive(
+        self,
+        url_to_full_document: dict[str, str],
+        source_id: str,
+    ) -> int:
+        """
+        Persist full markdown documents locally for easier access outside the vector store.
+
+        Args:
+            url_to_full_document: Mapping of crawled URLs to full markdown text.
+            source_id: Source identifier used to group archived files.
+
+        Returns:
+            Number of markdown files written successfully.
+        """
+        if not url_to_full_document:
+            return 0
+
+        sanitized_source_id = self._sanitize_source_id(source_id)
+
+        # Ensure parent directory exists lazily to avoid churn when disabled.
+        archive_root = self._markdown_archive_dir / sanitized_source_id
+
+        try:
+            archive_root.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            safe_logfire_error(
+                f"Failed to create markdown archive directory '{archive_root}': {exc}"
+            )
+            fallback_base = (self._project_root / "data" / "scraped_markdown").resolve()
+            try:
+                fallback_base.mkdir(parents=True, exist_ok=True)
+                archive_root = fallback_base / sanitized_source_id
+                archive_root.mkdir(parents=True, exist_ok=True)
+                safe_logfire_info(
+                    f"Using fallback markdown archive directory '{archive_root}'"
+                )
+            except Exception as fallback_exc:
+                safe_logfire_error(
+                    f"Failed to create fallback markdown archive directory '{fallback_base}': {fallback_exc}"
+                )
+                return 0
+
+        async def write_file(url: str, markdown: str) -> bool:
+            if not markdown:
+                return False
+
+            filename = f"{self._slugify_url(url)}.md"
+            target_path = archive_root / filename
+
+            try:
+                # Offload blocking IO to thread to avoid tying up the event loop.
+                await asyncio.to_thread(
+                    target_path.write_text,
+                    markdown,
+                    encoding="utf-8",
+                )
+                return True
+            except Exception as exc:
+                safe_logfire_error(
+                    f"Failed to write markdown archive for '{url}' to '{target_path}': {exc}"
+                )
+                return False
+
+        write_tasks = [
+            write_file(url, markdown)
+            for url, markdown in url_to_full_document.items()
+            if markdown and url
+        ]
+
+        if not write_tasks:
+            return 0
+
+        results = await asyncio.gather(*write_tasks, return_exceptions=True)
+        return sum(1 for result in results if result is True)
+
+    @staticmethod
+    def _sanitize_source_id(source_id: str) -> str:
+        """Create a filesystem-safe directory name from the source ID."""
+        if not source_id:
+            return "unknown-source"
+        sanitized = re.sub(r"[^a-zA-Z0-9._-]", "-", source_id)
+        sanitized = re.sub(r"-{2,}", "-", sanitized).strip("-")
+        return sanitized or "unknown-source"
+
+    @staticmethod
+    def _slugify_url(url: str) -> str:
+        """Generate a stable filename slug from a document URL."""
+        parsed = urlparse(url)
+        parts = [parsed.netloc or "document"]
+        if parsed.path and parsed.path != "/":
+            parts.append(parsed.path.strip("/").replace("/", "_"))
+        if parsed.fragment:
+            parts.append(parsed.fragment.replace("/", "_"))
+        base = "_".join(filter(None, parts)) or "document"
+        base = re.sub(r"[^a-zA-Z0-9._-]", "-", base)
+        base = re.sub(r"-{2,}", "-", base).strip("-")
+        return base or "document"
 
     async def _create_source_records(
         self,

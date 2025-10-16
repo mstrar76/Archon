@@ -36,6 +36,7 @@ services:
       - ./python/src:/app/src # Mount source code for hot reload
       - ./python/tests:/app/tests # Mount tests for UI test execution
       - ./migration:/app/migration # Mount migration files for version tracking
+      - ./data/scraped_markdown:/Data_dir # Persist markdown archive outside the vector database
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command:
