@@ -38,6 +38,23 @@ class RAGStrategyConfig:
     use_reranking: bool = True
 
 
+@dataclass
+class MCPMonitoringConfig:
+    """Configuration for MCP server monitoring strategy.
+
+    Controls how archon-server monitors MCP server status - via HTTP health checks
+    (secure, default) or Docker socket (legacy, security risk).
+
+    Attributes:
+        enable_docker_socket: Whether to use Docker socket for container status.
+                            Default False for security (uses HTTP health checks).
+        health_check_timeout: Timeout in seconds for HTTP health check requests.
+    """
+
+    enable_docker_socket: bool = False
+    health_check_timeout: int = 5
+
+
 def validate_openai_api_key(api_key: str) -> bool:
     """Validate OpenAI API key format."""
     if not api_key:
@@ -68,14 +85,14 @@ def validate_supabase_key(supabase_key: str) -> tuple[bool, str]:
         # Also skip all other validations (aud, exp, etc) since we only care about the role
         decoded = jwt.decode(
             supabase_key,
-            '',
+            "",
             options={
                 "verify_signature": False,
                 "verify_aud": False,
                 "verify_exp": False,
                 "verify_nbf": False,
-                "verify_iat": False
-            }
+                "verify_iat": False,
+            },
         )
         role = decoded.get("role")
 
@@ -231,4 +248,30 @@ def get_rag_strategy_config() -> RAGStrategyConfig:
         use_hybrid_search=str_to_bool(os.getenv("USE_HYBRID_SEARCH")),
         use_agentic_rag=str_to_bool(os.getenv("USE_AGENTIC_RAG")),
         use_reranking=str_to_bool(os.getenv("USE_RERANKING")),
+    )
+
+
+def get_mcp_monitoring_config() -> MCPMonitoringConfig:
+    """Load MCP monitoring configuration from environment variables.
+
+    Environment Variables:
+        ENABLE_DOCKER_SOCKET_MONITORING: "true"/"false" (default: false)
+            Controls whether to use Docker socket for status monitoring.
+            Default is false for security (uses HTTP health checks instead).
+        MCP_HEALTH_CHECK_TIMEOUT: Timeout in seconds (default: 5)
+            Timeout for HTTP health check requests to MCP server.
+
+    Returns:
+        MCPMonitoringConfig with parsed settings.
+    """
+
+    def str_to_bool(value: str | None) -> bool:
+        """Convert string environment variable to boolean."""
+        if value is None:
+            return False
+        return value.lower() in ("true", "1", "yes", "on")
+
+    return MCPMonitoringConfig(
+        enable_docker_socket=str_to_bool(os.getenv("ENABLE_DOCKER_SOCKET_MONITORING")),
+        health_check_timeout=int(os.getenv("MCP_HEALTH_CHECK_TIMEOUT", "5")),
     )
