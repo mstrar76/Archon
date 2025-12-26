@@ -203,6 +203,23 @@ class DocumentStorageService(BaseStorageService):
                         code_examples_count = 0
                 
                 await report_progress("Document upload completed!", 100)
+                
+                # Verify the source was created successfully in database
+                import asyncio
+                for attempt in range(3):  # Retry up to 3 times
+                    try:
+                        verification = self.supabase_client.table("archon_sources").select("source_id").eq("source_id", source_id).execute()
+                        if verification.data:
+                            logger.info(f"Source {source_id} verified in database")
+                            break
+                        else:
+                            logger.warning(f"Source {source_id} not found in database, attempt {attempt + 1}")
+                            if attempt < 2:
+                                await asyncio.sleep(1.0)  # Wait 1 second before retry
+                    except Exception as e:
+                        logger.warning(f"Database verification failed for {source_id}, attempt {attempt + 1}: {e}")
+                        if attempt < 2:
+                            await asyncio.sleep(1.0)
 
                 result = {
                     "chunks_stored": len(chunks),

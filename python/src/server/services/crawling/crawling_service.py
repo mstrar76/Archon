@@ -509,87 +509,159 @@ class CrawlingService:
             # Check for cancellation before document processing
             self._check_cancellation()
 
+            # Save to local markdown files if requested
+            save_to_local = request.get("save_to_local", False)
+            if save_to_local:
+                try:
+                    import os
+                    from urllib.parse import urlparse
+
+                    local_output_dir = request.get("local_output_dir", "crawled_files")
+
+                    # Create output directory if it doesn't exist
+                    try:
+                        os.makedirs(local_output_dir, exist_ok=True)
+                        safe_logfire_info(f"Created/verified directory: {local_output_dir}")
+                    except Exception as e:
+                        safe_logfire_error(f"Failed to create directory {local_output_dir}: {str(e)}")
+                        raise
+
+                    # Save crawled results to markdown files
+                    saved_files = []
+                    for i, doc in enumerate(crawl_results):
+                        try:
+                            # Create filename based on URL and index
+                            parsed_url = urlparse(doc.get('url', f'doc_{i}'))
+                            # Create a safe filename
+                            domain = parsed_url.netloc.replace('.', '_') if parsed_url.netloc else "unknown"
+                            path = parsed_url.path.replace('/', '_').replace('\\', '_')
+                            filename = f"{domain}{path}_{i}.md"
+
+                            # Ensure filename is not too long
+                            if len(filename) > 200:
+                                filename = f"{domain}_{i}.md"
+
+                            filepath = os.path.join(local_output_dir, filename)
+
+                            # Save document as markdown
+                            with open(filepath, 'w', encoding='utf-8') as f:
+                                # Write header metadata
+                                f.write(f"# {doc.get('title', 'Untitled')}\n\n")
+                                f.write(f"**Source URL**: {doc.get('url', '')}\n\n")
+                                f.write(f"**Crawled Date**: {doc.get('crawled_at', '')}\n\n")
+                                f.write("---\n\n")
+
+                                # Write markdown content
+                                markdown_content = doc.get('markdown', '')
+                                if markdown_content:
+                                    f.write(markdown_content)
+
+                            saved_files.append({
+                                'filename': filename,
+                                'filepath': filepath,
+                                'url': doc.get('url', ''),
+                                'title': doc.get('title', ''),
+                                'content_length': len(markdown_content or '')
+                            })
+
+                            safe_logfire_info(f"Saved markdown file: {filepath}")
+                        except Exception as e:
+                            safe_logfire_error(f"Failed to save file for document {i}: {str(e)}")
+                            # Continue with other files even if one fails
+
+                    safe_logfire_info(f"Saved {len(saved_files)} markdown files to {local_output_dir}")
+                except Exception as e:
+                    safe_logfire_error(f"Error saving markdown files: {str(e)}")
+                    # Don't raise the error, just log it so the rest of the process can continue
+
             # Calculate total work units for accurate progress tracking
             total_pages = len(crawl_results)
 
-            # Process and store documents using document storage operations
-            last_logged_progress = 0
+            # Process and store documents using document storage operations (only if saving to vector)
+            save_to_vector = request.get("save_to_vector", True)
+            storage_results = {}
+            code_examples_count = 0
+            actual_chunks_stored = 0
 
-            async def doc_storage_callback(
-                status: str, progress: int, message: str, **kwargs
-            ):
-                nonlocal last_logged_progress
+            if save_to_vector:
+                # Process and store documents using document storage operations
+                last_logged_progress = 0
 
-                # Log only significant progress milestones (every 5%) or status changes
-                should_log_debug = (
-                    status != "document_storage" or  # Status changes
-                    progress == 100 or  # Completion
-                    progress == 0 or  # Start
-                    abs(progress - last_logged_progress) >= 5  # 5% progress changes
+                async def doc_storage_callback(
+                    status: str, progress: int, message: str, **kwargs
+                ):
+                    nonlocal last_logged_progress
+
+                    # Log only significant progress milestones (every 5%) or status changes
+                    should_log_debug = (
+                        status != "document_storage" or  # Status changes
+                        progress == 100 or  # Completion
+                        progress == 0 or  # Start
+                        abs(progress - last_logged_progress) >= 5  # 5% progress changes
+                    )
+
+                    if should_log_debug:
+                        safe_logfire_info(
+                            f"Document storage progress: {progress}% | status={status} | "
+                            f"message={message[:50]}..." + ("..." if len(message) > 50 else "")
+                        )
+                        last_logged_progress = progress
+
+                    if self.progress_tracker:
+                        # Use ProgressMapper to ensure progress never goes backwards
+                        mapped_progress = self.progress_mapper.map_progress("document_storage", progress)
+
+                        # Update progress state via tracker
+                        await self.progress_tracker.update(
+                            status="document_storage",
+                            progress=mapped_progress,
+                            log=message,
+                            total_pages=total_pages,
+                            **kwargs
+                        )
+
+                storage_results = await self.doc_storage_ops.process_and_store_documents(
+                    crawl_results,
+                    request,
+                    crawl_type,
+                    original_source_id,
+                    doc_storage_callback,
+                    self._check_cancellation,
+                    source_url=url,
+                    source_display_name=source_display_name,
+                    url_to_page_id=None,  # Will be populated after page storage
                 )
 
-                if should_log_debug:
-                    safe_logfire_info(
-                        f"Document storage progress: {progress}% | status={status} | "
-                        f"message={message[:50]}..." + ("..." if len(message) > 50 else "")
-                    )
-                    last_logged_progress = progress
-
-                if self.progress_tracker:
-                    # Use ProgressMapper to ensure progress never goes backwards
-                    mapped_progress = self.progress_mapper.map_progress("document_storage", progress)
-
-                    # Update progress state via tracker
+                # Update progress tracker with source_id now that it's created
+                if self.progress_tracker and storage_results.get("source_id"):
+                    # Update the tracker to include source_id for frontend matching
+                    # Use update method to maintain timestamps and invariants
                     await self.progress_tracker.update(
-                        status="document_storage",
-                        progress=mapped_progress,
-                        log=message,
-                        total_pages=total_pages,
-                        **kwargs
+                        status=self.progress_tracker.state.get("status", "document_storage"),
+                        progress=self.progress_tracker.state.get("progress", 0),
+                        log=self.progress_tracker.state.get("log", "Processing documents"),
+                        source_id=storage_results["source_id"]
+                    )
+                    safe_logfire_info(
+                        f"Updated progress tracker with source_id | progress_id={self.progress_id} | source_id={storage_results['source_id']}"
                     )
 
-            storage_results = await self.doc_storage_ops.process_and_store_documents(
-                crawl_results,
-                request,
-                crawl_type,
-                original_source_id,
-                doc_storage_callback,
-                self._check_cancellation,
-                source_url=url,
-                source_display_name=source_display_name,
-                url_to_page_id=None,  # Will be populated after page storage
-            )
+                # Check for cancellation after document storage
+                self._check_cancellation()
 
-            # Update progress tracker with source_id now that it's created
-            if self.progress_tracker and storage_results.get("source_id"):
-                # Update the tracker to include source_id for frontend matching
-                # Use update method to maintain timestamps and invariants
-                await self.progress_tracker.update(
-                    status=self.progress_tracker.state.get("status", "document_storage"),
-                    progress=self.progress_tracker.state.get("progress", 0),
-                    log=self.progress_tracker.state.get("log", "Processing documents"),
-                    source_id=storage_results["source_id"]
-                )
-                safe_logfire_info(
-                    f"Updated progress tracker with source_id | progress_id={self.progress_id} | source_id={storage_results['source_id']}"
-                )
+                # Send heartbeat after document storage
+                await send_heartbeat_if_needed()
 
-            # Check for cancellation after document storage
-            self._check_cancellation()
-
-            # Send heartbeat after document storage
-            await send_heartbeat_if_needed()
-
-            # CRITICAL: Verify that chunks were actually stored
-            actual_chunks_stored = storage_results.get("chunks_stored", 0)
-            if storage_results["chunk_count"] > 0 and actual_chunks_stored == 0:
-                # We processed chunks but none were stored - this is a failure
-                error_msg = (
-                    f"Failed to store documents: {storage_results['chunk_count']} chunks processed but 0 stored "
-                    f"| url={url} | progress_id={self.progress_id}"
-                )
-                safe_logfire_error(error_msg)
-                raise ValueError(error_msg)
+                # CRITICAL: Verify that chunks were actually stored
+                actual_chunks_stored = storage_results.get("chunks_stored", 0)
+                if storage_results["chunk_count"] > 0 and actual_chunks_stored == 0:
+                    # We processed chunks but none were stored - this is a failure
+                    error_msg = (
+                        f"Failed to store documents: {storage_results['chunk_count']} chunks processed but 0 stored "
+                        f"| url={url} | progress_id={self.progress_id}"
+                    )
+                    safe_logfire_error(error_msg)
+                    raise ValueError(error_msg)
 
             # Extract code examples if requested
             code_examples_count = 0

@@ -151,6 +151,10 @@ class KnowledgeItemRequest(BaseModel):
     update_frequency: int = 7
     max_depth: int = 2  # Maximum crawl depth (1-5)
     extract_code_examples: bool = True  # Whether to extract code examples
+    # New save options (see SCRAPING.md)
+    save_to_vector: bool = True  # Save to vector database (default behavior)
+    save_to_local: bool = False  # Save to local files (optional)
+    local_output_dir: str = "crawled_files"  # Output directory for local files
 
     class Config:
         schema_extra = {
@@ -840,6 +844,10 @@ async def _perform_crawl_with_progress(
                 "max_depth": request.max_depth,
                 "extract_code_examples": request.extract_code_examples,
                 "generate_summary": True,
+                # Pass through new save options
+                "save_to_vector": request.save_to_vector,
+                "save_to_local": request.save_to_local,
+                "local_output_dir": request.local_output_dir,
             }
 
             # Orchestrate the crawl - this returns immediately with task info including the actual task
@@ -889,6 +897,77 @@ async def _perform_crawl_with_progress(
                 safe_logfire_info(
                     f"Cleaned up crawl task from registry | progress_id={progress_id}"
                 )
+
+
+class CrawlToFilesRequest(BaseModel):
+    url: str
+    output_dir: str = "crawled_files"
+    knowledge_type: str = "technical"
+    tags: list[str] = []
+    max_depth: int = 2
+
+
+@router.post("/knowledge-items/crawl-to-files")
+async def crawl_to_files(request: CrawlToFilesRequest):
+    """Crawl a URL and save content to local files only (no vector storage)."""
+    # Validate URL
+    if not request.url:
+        raise HTTPException(status_code=422, detail="URL is required")
+
+    if not request.url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=422, detail="URL must start with http:// or https://")
+
+    try:
+        safe_logfire_info(
+            f"Starting crawl-to-files | url={str(request.url)} | output_dir={request.output_dir}"
+        )
+
+        # Get crawler instance (same as other crawl paths)
+        try:
+            crawler = await get_crawler()
+            if crawler is None:
+                raise Exception("Crawler not available - initialization may have failed")
+        except Exception as e:
+            safe_logfire_error(f"Failed to get crawler | error={str(e)}")
+            raise HTTPException(status_code=500, detail={"error": f"Failed to initialize crawler: {str(e)}"})
+
+        # Prepare request dict compatible with CrawlingService
+        request_dict = {
+            "url": str(request.url),
+            "knowledge_type": request.knowledge_type,
+            "tags": request.tags or [],
+            "max_depth": request.max_depth,
+            # Ensure vector storage remains disabled for this endpoint
+            "save_to_vector": False,
+            "save_to_local": True,
+            "local_output_dir": request.output_dir,
+            "extract_code_examples": True,
+            "generate_summary": False,
+        }
+
+        # Use FileSaveCrawlingService to handle local-only save path
+        from ..services.crawling.save_to_files import FileSaveCrawlingService
+
+        service = FileSaveCrawlingService(crawler=crawler, supabase_client=get_supabase_client())
+        result = await service.crawl_and_save_to_files(request_dict, output_dir=request.output_dir)
+
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail={"error": result.get("error", "Crawl to files failed")})
+
+        total_files = result.get("total_files", 0)
+        output_dir = result.get("output_directory", request.output_dir)
+        return {
+            "success": True,
+            "message": f"Saved {total_files} files to {output_dir}",
+            **result,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        safe_logfire_error(
+            f"Failed crawl-to-files | error={str(e)} | url={str(request.url)} | output_dir={request.output_dir}"
+        )
+        raise HTTPException(status_code=500, detail={"error": str(e)})
 
 
 @router.post("/documents/upload")
@@ -1030,8 +1109,11 @@ async def _perform_upload_with_progress(
         # Use DocumentStorageService to handle the upload
         doc_storage_service = DocumentStorageService(get_supabase_client())
 
-        # Generate source_id from filename with UUID to prevent collisions
-        source_id = f"file_{filename.replace(' ', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
+        # Generate unique source_id from filename with microsecond precision and random component
+        timestamp = int(time.time() * 1000000)  # microsecond precision
+        random_suffix = str(uuid.uuid4())[:8]  # short random component
+        safe_filename = filename.replace(' ', '_').replace('.', '_')[:30]  # limit length
+        source_id = f"file_{safe_filename}_{timestamp}_{random_suffix}"
 
         # Create progress callback for tracking document processing
         async def document_progress_callback(
@@ -1270,11 +1352,24 @@ async def knowledge_health():
             "migration_instructions": "Open Supabase Dashboard → SQL Editor → Run: migration/add_source_url_display_name.sql"
         }
 
-    # Removed health check logging to reduce console noise
+    # Test database connectivity
+    try:
+        supabase = get_supabase_client()
+        test_query = supabase.table("archon_sources").select("source_id").limit(1).execute()
+        db_healthy = True
+        db_message = "Database connection verified"
+    except Exception as e:
+        db_healthy = False
+        db_message = f"Database connection failed: {str(e)}"
+
     result = {
-        "status": "healthy",
+        "status": "healthy" if db_healthy else "degraded",
         "service": "knowledge-api",
         "timestamp": datetime.now().isoformat(),
+        "database": {
+            "healthy": db_healthy,
+            "message": db_message
+        }
     }
 
     return result

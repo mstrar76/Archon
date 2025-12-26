@@ -43,6 +43,10 @@ export const AddKnowledgeDialog: React.FC<AddKnowledgeDialogProps> = ({
   const [crawlType, setCrawlType] = useState<"technical" | "business">("technical");
   const [maxDepth, setMaxDepth] = useState("2");
   const [tags, setTags] = useState<string[]>([]);
+  // Save options
+  const [saveToVector, setSaveToVector] = useState(true);
+  const [saveToLocal, setSaveToLocal] = useState(false);
+  const [localOutputDir, setLocalOutputDir] = useState("crawled_files");
 
   // Upload form state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -54,6 +58,9 @@ export const AddKnowledgeDialog: React.FC<AddKnowledgeDialogProps> = ({
     setCrawlType("technical");
     setMaxDepth("2");
     setTags([]);
+    setSaveToVector(true);
+    setSaveToLocal(false);
+    setLocalOutputDir("crawled_files");
     setSelectedFile(null);
     setUploadType("technical");
     setUploadTags([]);
@@ -71,6 +78,9 @@ export const AddKnowledgeDialog: React.FC<AddKnowledgeDialogProps> = ({
         knowledge_type: crawlType,
         max_depth: parseInt(maxDepth, 10),
         tags: tags.length > 0 ? tags : undefined,
+        save_to_vector: saveToVector,
+        save_to_local: saveToLocal,
+        local_output_dir: localOutputDir,
       };
 
       const response = await crawlMutation.mutateAsync(request);
@@ -187,6 +197,56 @@ export const AddKnowledgeDialog: React.FC<AddKnowledgeDialogProps> = ({
               disabled={isProcessing}
               placeholder="Add tags like 'api', 'documentation', 'guide'..."
             />
+
+            {/* Save Options */}
+            <div className="space-y-3">
+              <Label className="text-sm font-medium text-gray-900 dark:text-white/90">
+                Save Options
+              </Label>
+              <div className="space-y-3 pl-1">
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={saveToVector}
+                    onChange={(e) => setSaveToVector(e.target.checked)}
+                    disabled={isProcessing}
+                    className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 border-gray-300"
+                  />
+                  <span className="text-sm text-gray-700 dark:text-gray-300">
+                    Save to Vector Database (for RAG search)
+                  </span>
+                </label>
+
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={saveToLocal}
+                    onChange={(e) => setSaveToLocal(e.target.checked)}
+                    disabled={isProcessing}
+                    className="w-4 h-4 rounded text-green-600 focus:ring-green-500 border-gray-300"
+                  />
+                  <span className="text-sm text-gray-700 dark:text-gray-300">
+                    Save to Local Markdown Files
+                  </span>
+                </label>
+
+                {saveToLocal && (
+                  <div className="ml-7 mt-2">
+                    <Input
+                      type="text"
+                      value={localOutputDir}
+                      onChange={(e) => setLocalOutputDir(e.target.value)}
+                      disabled={isProcessing}
+                      placeholder="crawled_files"
+                      className="h-10"
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1.5">
+                      Files will be saved as markdown in the Archon directory
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
 
             <Button
               onClick={handleCrawl}

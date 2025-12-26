@@ -140,6 +140,10 @@ export interface CrawlRequest {
   update_frequency?: number;
   max_depth?: number;
   extract_code_examples?: boolean;
+  // Save options
+  save_to_vector?: boolean;
+  save_to_local?: boolean;
+  local_output_dir?: string;
 }
 
 export interface UploadMetadata {

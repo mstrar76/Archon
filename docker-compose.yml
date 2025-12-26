@@ -237,3 +237,5 @@ services:
 networks:
   app-network:
     driver: bridge
+  supabase_network_archon:
+    external: true

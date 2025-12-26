@@ -50,6 +50,8 @@ Archon uses true microservices architecture with clear separation of concerns:
 
 ## 🚀 Quick Start for Contributors
 
+Before you start, review the repo’s standards and commands in the [Repository Guidelines (AGENTS.md)](AGENTS.md). It covers project structure, how to build/run/test, coding style (Ruff/Mypy), and testing conventions.
+
 ### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
